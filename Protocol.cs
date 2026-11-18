@@ -1,0 +1,191 @@
+using System.Globalization;
+using System.Numerics;
+using System.Text;
+using System.Text.Json;
+
+namespace FranklinEvo;
+
+public class ProtocolException(string message) : Exception(message);
+public sealed class UnsupportedCommandException(string message) : ProtocolException(message);
+public sealed class UnavailableParameterException(string message) : ProtocolException(message);
+public sealed record Query(string Command, string[]? Parameters);
+
+public static class Protocol
+{
+    public static readonly Dictionary<string, string> Parameters = new()
+    {
+        ["level"] = "Product level, 2 decimal places",
+        ["density"] = "Product density as decoded from device, no scaling or rounding",
+        ["temperature"] = "Product temperature, 2 decimal places",
+        ["volume"] = "Product volume, 2 decimal places",
+        ["tc_volume"] = "Temperature-compensated volume, 2 decimal places",
+        ["ullage"] = "Available tank volume, 2 decimal places",
+        ["water_level"] = "Water height, 2 decimal places",
+        ["water_volume"] = "Water volume, 2 decimal places, if supplied",
+        ["mass"] = "Product mass, 2 decimal places, console-native units, no scaling",
+        ["tc_density"] = "TC density as decoded from device, no scaling or rounding, if supplied",
+        ["product_code"] = "Product code from the console",
+        ["status"] = "Inventory status mask, four hexadecimal characters",
+        ["delivery_in_progress"] = "Delivery flag: 1 or 0",
+        ["leak_test_in_progress"] = "Leak test flag: 1 or 0",
+        ["invalid_fuel_height"] = "Invalid fuel height flag: 1 or 0",
+        ["unknown_status_bits"] = "Remaining status bits, four hexadecimal characters",
+        ["tank"] = "Tank number from the response",
+        ["device_time"] = "Console time as YYMMDDHHmm, no timezone conversion"
+    };
+    public static readonly HashSet<string> TwoDecimals = ["level", "temperature", "volume", "tc_volume", "ullage", "water_level", "water_volume", "mass"];
+    public static readonly HashSet<string> Densities = ["density", "tc_density"];
+    static readonly HashSet<string> Derived = ["delivery_in_progress", "leak_test_in_progress", "invalid_fuel_height", "unknown_status_bits"];
+    static readonly string[] Fields214 = ["volume", "mass", "density", "level", "water_level", "temperature", "tc_density", "tc_volume", "ullage", "water_volume"];
+    static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+    public static Query CreateQuery(int tank, string[]? parameters)
+    {
+        string suffix = tank.ToString("D2", Inv);
+        return new("i214" + suffix, parameters);
+    }
+
+    public static byte[] Request(string command)
+    {
+        if (command.Length != 6 || command[..4] != "i214" || !Digits(command[4..]))
+            throw new ArgumentException("Only i214TT for tank 00..99 is allowed");
+        return Encoding.ASCII.GetBytes("\x01" + command);
+    }
+    public static ushort Checksum(ReadOnlySpan<byte> data)
+    {
+        int sum = 0;
+        foreach (byte b in data) sum += b;
+        return unchecked((ushort)-sum);
+    }
+    static bool Digits(string text) => text.Length > 0 && text.All(c => c is >= '0' and <= '9');
+    static bool Hex(string text) => text.Length > 0 && text.All(Uri.IsHexDigit);
+
+    public static Dictionary<int, Dictionary<string, object>> Parse(byte[] frame, string command, string[]? parameters)
+    {
+        Request(command);
+        if (frame.Length < 2 || frame[0] != 1 || frame[^1] != 3) throw new ProtocolException("Missing SOH/ETX");
+        if (frame.AsSpan().SequenceEqual(new byte[] { 1, 57, 57, 57, 57, 70, 70, 49, 66, 3 }))
+            throw new UnsupportedCommandException("Device rejected command (9999)");
+        if (frame.Length < 24 || frame[^7] != '&' || frame[^6] != '&') throw new ProtocolException("Invalid checksum trailer");
+        string check = Encoding.ASCII.GetString(frame, frame.Length - 5, 4);
+        if (!Hex(check)) throw new ProtocolException("Invalid checksum trailer");
+        if (ushort.Parse(check, NumberStyles.HexNumber, Inv) != Checksum(frame.AsSpan(0, frame.Length - 5)))
+            throw new ProtocolException("Checksum mismatch");
+        if (frame.AsSpan(1, frame.Length - 8).ContainsAnyInRange((byte)128, (byte)255)) throw new ProtocolException("Non-ASCII response");
+        string text = Encoding.ASCII.GetString(frame, 1, frame.Length - 8);
+        if (!text.StartsWith(command, StringComparison.Ordinal)) throw new ProtocolException("Response command does not match request");
+        string timestamp = text.Substring(6, 10);
+        if (!Digits(timestamp)) throw new ProtocolException("Invalid timestamp field");
+        var result = new Dictionary<int, Dictionary<string, object>>();
+        string[] fields = Fields214;
+        int requestedTank = int.Parse(command[4..], Inv);
+        int pos = 16;
+        while (pos < text.Length)
+        {
+            if (text.Length - pos < 9) throw new ProtocolException("Missing or invalid tank record");
+            string header = text.Substring(pos, 9);
+            if (!Digits(header[..2]) || header[2] < ' ' || header[2] > '~' || !Hex(header[3..]))
+                throw new ProtocolException("Invalid tank header");
+            int tank = int.Parse(header[..2], Inv);
+            int status = int.Parse(header.Substring(3, 4), NumberStyles.HexNumber, Inv);
+            int count = int.Parse(header[7..], NumberStyles.HexNumber, Inv);
+            int end = pos + 9 + count * 8;
+            if (tank == 0 || result.ContainsKey(tank) || (requestedTank != 0 && tank != requestedTank))
+                throw new ProtocolException("Invalid/duplicate tank or response contains a different tank");
+            if (count < 6 || end > text.Length || !Hex(text.Substring(pos + 9, count * 8)))
+                throw new ProtocolException("Invalid field count or truncated inventory");
+            var metadata = new Dictionary<string, object>
+            {
+                ["tank"] = tank, ["product_code"] = header[2].ToString(), ["device_time"] = timestamp,
+                ["status"] = status.ToString("X4", Inv), ["delivery_in_progress"] = (status & 1) != 0 ? 1 : 0,
+                ["leak_test_in_progress"] = (status & 2) != 0 ? 1 : 0,
+                ["invalid_fuel_height"] = (status & 4) != 0 ? 1 : 0,
+                ["unknown_status_bits"] = (status & ~7).ToString("X4", Inv)
+            };
+            var names = Enumerable.Range(0, count).Select(i => i < fields.Length ? fields[i] : $"field_{i + 1}").ToArray();
+            var row = new Dictionary<string, object>();
+            foreach (string name in parameters ?? metadata.Keys.Concat(names).ToArray())
+            {
+                if (metadata.TryGetValue(name, out object? value)) { row[name] = value; continue; }
+                int index = Array.IndexOf(names, name);
+                if (index < 0) throw new UnavailableParameterException($"Parameter {name} is unavailable in {command} ({count} fields)");
+                uint bits = uint.Parse(text.AsSpan(pos + 9 + index * 8, 8), NumberStyles.HexNumber, Inv);
+                // Promotion preserves the exact float32 value before decimal formatting.
+                double number = BitConverter.Int32BitsToSingle(unchecked((int)bits));
+                if (!double.IsFinite(number)) throw new ProtocolException($"Non-finite value: {name}");
+                row[name] = number;
+            }
+            result.Add(tank, row);
+            pos = end;
+        }
+        if (requestedTank != 0 && result.Count != 1) throw new ProtocolException("Missing or extra tank record");
+        return result;
+    }
+
+    public static string Format(object value, string name, string separator = "dot")
+    {
+        string text = value is double d ? d.ToString("R", Inv) : Convert.ToString(value, Inv)!;
+        if (TwoDecimals.Contains(name))
+        {
+            // Decimal ROUND_HALF_UP on the round-trip representation. BigInteger also handles the
+            // full float32 range without decimal overflow or binary midpoint rounding surprises.
+            bool negative = text.StartsWith('-');
+            string abs = text.TrimStart('-', '+');
+            string[] parts = abs.Split(['e', 'E']);
+            int exponent = parts.Length > 1 ? int.Parse(parts[1], Inv) : 0;
+            int dot = parts[0].IndexOf('.');
+            int fractional = dot < 0 ? 0 : parts[0].Length - dot - 1;
+            BigInteger digits = BigInteger.Parse(parts[0].Replace(".", ""), Inv);
+            int precision = 2;
+            int shift = exponent - fractional + precision;
+            if (shift >= 0) digits *= BigInteger.Pow(10, shift);
+            else
+            {
+                BigInteger divisor = BigInteger.Pow(10, -shift);
+                digits = BigInteger.DivRem(digits, divisor, out BigInteger remainder);
+                if (remainder * 2 >= divisor) digits++;
+            }
+            string formatted = digits.ToString(Inv).PadLeft(precision + 1, '0');
+            text = (negative && digits != 0 ? "-" : "") + formatted.Insert(formatted.Length - precision, ".");
+        }
+        if (separator == "comma" && (TwoDecimals.Contains(name) || Densities.Contains(name) || name.StartsWith("field_", StringComparison.Ordinal)))
+            text = text.Replace('.', ',');
+        return text;
+    }
+
+    public static string Json(Dictionary<int, Dictionary<string, object>> tanks)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartArray();
+            foreach (var (tank, row) in tanks.OrderBy(pair => pair.Key))
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("tank", tank);
+                foreach (var (name, value) in row)
+                {
+                    if (name == "tank" || Derived.Contains(name)) continue;
+                    writer.WritePropertyName(name == "level" ? "product_level" : name);
+                    if (name == "device_time")
+                    {
+                        // Two-digit year pivot: 00..68 -> 2000..2068; 69..99 -> 1969..1999.
+                        string time = (string)value;
+                        int yy = int.Parse(time[..2], Inv);
+                        string year = ((yy <= 68 ? 2000 : 1900) + yy).ToString(Inv);
+                        if (!DateTime.TryParseExact(year + time[2..], "yyyyMMddHHmm", Inv, DateTimeStyles.None, out var date))
+                            throw new ProtocolException("Invalid console date/time");
+                        writer.WriteStringValue(date.ToString("yyyy-MM-dd'T'HH:mm:ss", Inv));
+                    }
+                    else if (TwoDecimals.Contains(name)) writer.WriteRawValue(Format(value, name));
+                    else if (value is double number) writer.WriteNumberValue(number);
+                    else if (value is int integer) writer.WriteNumberValue(integer);
+                    else writer.WriteStringValue((string)value);
+                }
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+}

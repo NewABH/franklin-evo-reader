@@ -1,0 +1,12 @@
+bin/
+obj/
+dist/
+dist-self-contained/
+tools/
+tests/bin/
+tests/obj/
+captures/
+
+test-data/
+*.user
+.vs/
