@@ -3,6 +3,8 @@ using System.Net.Sockets;
 
 namespace FranklinEvo;
 
+// Настройки одного запуска. Нулевой Tank означает все резервуары,
+// Parameters == null — полный JSON, Interval == null — однократный опрос.
 public sealed class Options
 {
     public string? Host { get; set; }
@@ -21,6 +23,7 @@ public sealed class Options
 
     public static Options Parse(string[] arguments)
     {
+        // Приводим --ключ=значение к той же форме, что и --ключ значение.
         var args = new List<string>();
         foreach (string arg in arguments)
         {
@@ -30,6 +33,7 @@ public sealed class Options
             else args.Add(arg);
         }
         var options = new Options();
+        // Читает значение следующего аргумента и одновременно сдвигает индекс разбора.
         string Value(ref int i)
         {
             if (++i >= args.Count || args[i].StartsWith("--", StringComparison.Ordinal)) throw new ArgumentException($"Missing value for {args[i - 1]}");
@@ -37,6 +41,7 @@ public sealed class Options
         }
         static int Integer(string text) => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int result)
             ? result : throw new ArgumentException($"Invalid integer: {text}");
+        // Верхняя граница укладывается в допустимый диапазон таймеров .NET.
         static double Positive(string text) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double result)
             && double.IsFinite(result) && result > 0 && result <= 4294967
             ? result : throw new ArgumentException("Timeout/delay must be finite, positive and at most 4294967 seconds");
@@ -54,6 +59,7 @@ public sealed class Options
                     break;
                 case "--parameter": case "--param":
                     var names = new List<string>();
+                    // Список параметров продолжается до следующей опции; порядок сохраняем.
                     while (i + 1 < args.Count && !args[i + 1].StartsWith('-'))
                     {
                         string name = args[++i] == "product_level" ? "level" : args[i];
@@ -77,6 +83,7 @@ public sealed class Options
                 default: throw new ArgumentException($"Unknown option: {args[i]}");
             }
         }
+        // Справка доступна без адреса и порта. Для опроса проверяем настройки до сети.
         if (!options.Help && !options.ListParameters)
         {
             if (string.IsNullOrWhiteSpace(options.Host) || options.Port == 0) throw new ArgumentException("--host (or --ip) and --port are required");
@@ -86,6 +93,7 @@ public sealed class Options
     }
 }
 
+// Точка входа связывает CLI, TCP-клиент и форматирование результата.
 public static class Program
 {
     public const string Help = """
@@ -109,6 +117,7 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        // Коды выхода: 0 — успех, 1 — ошибка опроса/файлов, 2 — аргументы, 130 — Ctrl+C.
         Options options;
         try { options = Options.Parse(args); }
         catch (ArgumentException ex) { Console.Error.WriteLine($"Argument error: {ex.Message}"); return 2; }
@@ -118,6 +127,7 @@ public static class Program
             foreach (var (name, description) in Protocol.Parameters) Console.WriteLine($"{name}: {description}");
             return 0;
         }
+        // Ctrl+C отменяет сетевые ожидания и паузы; using гарантирует закрытие сокета.
         using var cancellation = new CancellationTokenSource();
         ConsoleCancelEventHandler handler = (_, e) => { e.Cancel = true; cancellation.Cancel(); };
         Console.CancelKeyPress += handler;
@@ -130,9 +140,11 @@ public static class Program
 
     public static async Task<int> Run(Options options, CancellationToken cancellation)
     {
+        // Один клиент на весь запуск: в циклическом режиме используем тот же сокет.
         using var client = new Client(options);
         if (options.CaptureDirectory is not null) Directory.CreateDirectory(options.CaptureDirectory);
         var query = Protocol.CreateQuery(options.Tank, options.Parameters);
+        // Запоминаем ошибки циклов, даже если последующий опрос оказался успешным.
         bool failed = false;
         while (true)
         {
@@ -141,6 +153,7 @@ public static class Program
             {
                 Dictionary<int, Dictionary<string, object>> values;
                 try { values = await client.Query(query, cancellation); }
+                // Сохраняем принятые байты и при ошибке разбора — это помогает диагностике.
                 finally
                 {
                     if (options.CaptureDirectory is not null && client.LastFrame.Length > 0)
@@ -150,6 +163,8 @@ public static class Program
                     }
                 }
                 string output;
+                // Полный отчёт — JSON. Явный выбор — значения через ';';
+                // при опросе всех резервуаров добавляем номер и имена полей в каждой строке.
                 if (options.Parameters is null) output = Protocol.Json(values);
                 else
                 {
@@ -159,12 +174,13 @@ public static class Program
                         ? string.Join(Environment.NewLine, values.OrderBy(pair => pair.Key).Select(pair => $"tank={pair.Key};" + string.Join(';', options.Parameters.Select(p => $"{p}={Protocol.Format(pair.Value[p], p, options.Separator)}"))))
                         : string.Join(';', options.Parameters.Select(p => Protocol.Format(values[options.Tank][p], p, options.Separator)));
                 }
-                // Emit only after parsing and formatting succeeded, never partial JSON.
+                // Печатаем результат только после успешного разбора и форматирования целиком.
                 Console.WriteLine(output);
             }
             catch (Exception ex) when (ex is ProtocolException or IOException or SocketException or TimeoutException or UnauthorizedAccessException)
             {
                 failed = true;
+                // stderr отделяет диагностику от stdout, который может читать другая программа.
                 Console.Error.WriteLine($"{ex.GetType().Name}: {ex.Message}");
             }
             if (options.Interval is null) break;
