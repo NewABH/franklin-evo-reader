@@ -88,9 +88,9 @@ static class Tests
                 Equal(Protocol.Format((double)float.MaxValue, "volume"), "340282346638528860000000000000000000000.00");
                 Equal(Protocol.Format((double)float.Epsilon, "volume"), "0.00");
             });
-            Test("density without scaling or rounding", () =>
+            Test("density divided by ten and rounded to integer", () =>
             {
-                foreach (var (value, expected) in new[] { (739.85, "739.85"), (739.5, "739.5"), (739.49, "739.49"), (1000.0, "1000"), (0.0, "0") })
+                foreach (var (value, expected) in new[] { (739.85, "74"), (735.0, "74"), (734.99, "73"), (-735.0, "-74"), (-0.1, "0"), (1000.0, "100"), (0.0, "0") })
                     foreach (string name in Protocol.Densities) Equal(Protocol.Format(value, name), expected);
             });
             Test("decode float32 and selected fields", () =>
@@ -98,7 +98,7 @@ static class Tests
                 var row = Protocol.Parse(Packed(), "i21404", ["density", "mass", "level"])[4];
                 Equal(row.Count, 3); Equal((double)row["level"], 922.125);
                 Equal(Protocol.Format(row["mass"], "mass"), "34765.25");
-                Equal(Protocol.Format(row["density"], "density", "comma"), "739,8499755859375");
+                Equal(Protocol.Format(row["density"], "density", "comma"), "74");
             });
             Test("all tanks and duplicate protection", () =>
             {
@@ -137,7 +137,7 @@ static class Tests
                 var tanks = Protocol.Parse(Packed(values: [1000, 34765.24609375f, 739.85f, 100, 0, 15.285f]), "i21404", null);
                 using var json = JsonDocument.Parse(Protocol.Json(tanks));
                 var row = json.RootElement[0]; Equal(row.GetProperty("volume").GetDouble(), 1000.0);
-                Equal(row.GetProperty("mass").GetDouble(), 34765.25); Equal(row.GetProperty("density").GetDouble(), 739.8499755859375);
+                Equal(row.GetProperty("mass").GetDouble(), 34765.25); Equal(row.GetProperty("density").GetDouble(), 74.0);
                 Equal(row.GetProperty("device_time").GetString(), "2026-11-16T12:00:00");
                 Equal(row.EnumerateObject().Count(), 10);
                 foreach (string name in new[] { "commands", "ok", "checksum_verified", "attempts", "reports", "units", "delivery_in_progress", "measurements" }) Assert(!row.TryGetProperty(name, out _));
@@ -295,14 +295,14 @@ static class Tests
                                     using (var json = JsonDocument.Parse(output))
                                     {
                                         Equal(json.RootElement.GetArrayLength(), 4);
-                                        Equal(json.RootElement[3].GetProperty("density").GetDouble(), 739.8499755859375);
+                                        Equal(json.RootElement[3].GetProperty("density").GetDouble(), 74.0);
                                         Equal(json.RootElement[3].GetProperty("mass").GetDouble(), 34765.25);
                                         Equal(json.RootElement[3].EnumerateObject().Count(), 10);
                                     }
                                     Equal(string.Join(',', requests), "i21400"); break;
-                                case "single": Equal(output, "739,8499755859375"); Equal(requests[0], "i21404"); break;
+                                case "single": Equal(output, "74"); Equal(requests[0], "i21404"); break;
                                 case "mass": Equal(output, "34765,25"); break;
-                                case "mixed": Equal(output, "100,00;739,8499755859375;34765,25"); Equal(string.Join(',', requests), "i21404"); break;
+                                case "mixed": Equal(output, "100,00;74;34765,25"); Equal(string.Join(',', requests), "i21404"); break;
                                 case "level": Equal(output, "100.00"); Equal(requests[0], "i21404"); break;
                             }
                         }

@@ -21,7 +21,7 @@ public static class Protocol
     public static readonly Dictionary<string, string> Parameters = new()
     {
         ["level"] = "Product level, 2 decimal places",
-        ["density"] = "Product density as decoded from device, no scaling or rounding",
+        ["density"] = "Product density / 10, rounded to an integer",
         ["temperature"] = "Product temperature, 2 decimal places",
         ["volume"] = "Product volume, 2 decimal places",
         ["tc_volume"] = "Temperature-compensated volume, 2 decimal places",
@@ -29,7 +29,7 @@ public static class Protocol
         ["water_level"] = "Water height, 2 decimal places",
         ["water_volume"] = "Water volume, 2 decimal places, if supplied",
         ["mass"] = "Product mass, 2 decimal places, console-native units, no scaling",
-        ["tc_density"] = "TC density as decoded from device, no scaling or rounding, if supplied",
+        ["tc_density"] = "TC density / 10, rounded to an integer, if supplied",
         ["product_code"] = "Product code from the console",
         ["status"] = "Inventory status mask, four hexadecimal characters",
         ["delivery_in_progress"] = "Delivery flag: 1 or 0",
@@ -40,7 +40,7 @@ public static class Protocol
         ["device_time"] = "Console time as YYMMDDHHmm, no timezone conversion"
     };
     public static readonly HashSet<string> TwoDecimals = ["level", "temperature", "volume", "tc_volume", "ullage", "water_level", "water_volume", "mass"];
-    // Плотность не входит в TwoDecimals: не делим её и не округляем.
+    // Для плотности действует отдельное правило: деление на 10 и округление до целого.
     public static readonly HashSet<string> Densities = ["density", "tc_density"];
     static readonly HashSet<string> Derived = ["delivery_in_progress", "leak_test_in_progress", "invalid_fuel_height", "unknown_status_bits"];
     // Позиции измерений в i214. Базовый ответ EVO содержит первые шесть полей.
@@ -154,7 +154,7 @@ public static class Protocol
         // Формат R сохраняет декодированное значение при обратном чтении числа.
         // InvariantCulture исключает зависимость результата от локали Windows.
         string text = value is double d ? d.ToString("R", Inv) : Convert.ToString(value, Inv)!;
-        if (TwoDecimals.Contains(name))
+        if (TwoDecimals.Contains(name) || Densities.Contains(name))
         {
             // Десятичное округление половин от нуля. BigInteger позволяет работать
             // со всем диапазоном float32 без переполнения decimal и ошибок двоичного округления.
@@ -165,9 +165,10 @@ public static class Protocol
             int dot = parts[0].IndexOf('.');
             int fractional = dot < 0 ? 0 : parts[0].Length - dot - 1;
             BigInteger digits = BigInteger.Parse(parts[0].Replace(".", ""), Inv);
-            int precision = 2;
-            // Переносим десятичную точку так, чтобы целое число означало сотые доли.
-            int shift = exponent - fractional + precision;
+            int precision = Densities.Contains(name) ? 0 : 2;
+            // Для плотности сдвиг на один разряд выполняет деление на 10
+            // до округления; для остальных величин целое число означает сотые доли.
+            int shift = exponent - fractional + precision - (Densities.Contains(name) ? 1 : 0);
             if (shift >= 0) digits *= BigInteger.Pow(10, shift);
             else
             {
@@ -177,7 +178,8 @@ public static class Protocol
             }
             string formatted = digits.ToString(Inv).PadLeft(precision + 1, '0');
             // У округлённого нуля убираем минус, например -0.001 -> 0.00.
-            text = (negative && digits != 0 ? "-" : "") + formatted.Insert(formatted.Length - precision, ".");
+            text = (negative && digits != 0 ? "-" : "") +
+                (precision == 0 ? formatted : formatted.Insert(formatted.Length - precision, "."));
         }
         if (separator == "comma" && (TwoDecimals.Contains(name) || Densities.Contains(name) || name.StartsWith("field_", StringComparison.Ordinal)))
             text = text.Replace('.', ',');
@@ -210,9 +212,9 @@ public static class Protocol
                             throw new ProtocolException("Invalid console date/time");
                         writer.WriteStringValue(date.ToString("yyyy-MM-dd'T'HH:mm:ss", Inv));
                     }
-                    // Уже отформатированное число пишем без кавычек. Остальные double,
-                    // включая плотность, уходят в JSON напрямую, без округления.
-                    else if (TwoDecimals.Contains(name)) writer.WriteRawValue(Format(value, name));
+                    // Плотность и округляемые измерения пишем числами, без кавычек.
+                    // Неизвестные дополнительные измерения сохраняем без преобразований.
+                    else if (TwoDecimals.Contains(name) || Densities.Contains(name)) writer.WriteRawValue(Format(value, name));
                     else if (value is double number) writer.WriteNumberValue(number);
                     else if (value is int integer) writer.WriteNumberValue(integer);
                     else writer.WriteStringValue((string)value);
