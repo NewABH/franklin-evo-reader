@@ -21,7 +21,7 @@ public static class Protocol
     public static readonly Dictionary<string, string> Parameters = new()
     {
         ["level"] = "Product level, 2 decimal places",
-        ["density"] = "Product density / 10, rounded to an integer",
+        ["density"] = "Product density rounded to an integer, no scaling",
         ["temperature"] = "Product temperature, 2 decimal places",
         ["volume"] = "Product volume, 2 decimal places",
         ["tc_volume"] = "Temperature-compensated volume, 2 decimal places",
@@ -29,7 +29,7 @@ public static class Protocol
         ["water_level"] = "Water height, 2 decimal places",
         ["water_volume"] = "Water volume, 2 decimal places, if supplied",
         ["mass"] = "Product mass, 2 decimal places, console-native units, no scaling",
-        ["tc_density"] = "TC density / 10, rounded to an integer, if supplied",
+        ["tc_density"] = "TC density rounded to an integer, no scaling, if supplied",
         ["product_code"] = "Product code from the console",
         ["status"] = "Inventory status mask, four hexadecimal characters",
         ["delivery_in_progress"] = "Delivery flag: 1 or 0",
@@ -40,7 +40,7 @@ public static class Protocol
         ["device_time"] = "Console time as YYMMDDHHmm, no timezone conversion"
     };
     public static readonly HashSet<string> TwoDecimals = ["level", "temperature", "volume", "tc_volume", "ullage", "water_level", "water_volume", "mass"];
-    // Для плотности действует отдельное правило: деление на 10 и округление до целого.
+    // Плотность округляем до целого, не меняя масштаб исходного значения.
     public static readonly HashSet<string> Densities = ["density", "tc_density"];
     static readonly HashSet<string> Derived = ["delivery_in_progress", "leak_test_in_progress", "invalid_fuel_height", "unknown_status_bits"];
     // Позиции измерений в i214. Базовый ответ EVO содержит первые шесть полей.
@@ -166,9 +166,8 @@ public static class Protocol
             int fractional = dot < 0 ? 0 : parts[0].Length - dot - 1;
             BigInteger digits = BigInteger.Parse(parts[0].Replace(".", ""), Inv);
             int precision = Densities.Contains(name) ? 0 : 2;
-            // Для плотности сдвиг на один разряд выполняет деление на 10
-            // до округления; для остальных величин целое число означает сотые доли.
-            int shift = exponent - fractional + precision - (Densities.Contains(name) ? 1 : 0);
+            // Для плотности оставляем целые единицы; для остальных величин — сотые доли.
+            int shift = exponent - fractional + precision;
             if (shift >= 0) digits *= BigInteger.Pow(10, shift);
             else
             {
