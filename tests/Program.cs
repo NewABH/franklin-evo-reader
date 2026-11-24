@@ -50,6 +50,12 @@ static class Tests
                 Assert(Options.Parse(["--list-parameters"]).ListParameters);
                 Assert(Options.Parse(["--help"]).Help);
             });
+            Test("socket error includes stable codes", () =>
+            {
+                var error = new SocketException(10061);
+                Equal(FranklinEvo.Program.FormatError(error), $"SocketException [10061, ConnectionRefused]: {error.Message}");
+                Equal(FranklinEvo.Program.FormatError(new IOException("Ошибка чтения")), "IOException: Ошибка чтения");
+            });
             Test("invalid CLI", () =>
             {
                 foreach (string[] input in new string[][] { [], ["--host", "x"], ["--port", "8001"],
@@ -238,7 +244,7 @@ static class Tests
             if (args.Length > 1)
             {
                 string executable = Path.GetFullPath(args[1]);
-                foreach (string scenario in new[] { "all", "single", "mass", "mixed", "level", "atomic failure", "missing field", "no fallback", "invalid arguments" })
+                foreach (string scenario in new[] { "all", "single", "mass", "mixed", "level", "atomic failure", "missing field", "no fallback", "invalid arguments", "utf8 error" })
                     await Test("EXE " + scenario, async () =>
                     {
                         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
@@ -254,10 +260,11 @@ static class Tests
                             "no fallback" => ["--tank", "4", "--param", "tc_volume"],
                             "missing field" => ["--tank", "4", "--param", "tc_density"],
                             "invalid arguments" => ["--tank", "0"],
+                            "utf8 error" => ["--неизвестная-опция"],
                             _ => []
                         };
                         int queries = 1;
-                        Task server = scenario == "invalid arguments" ? Task.CompletedTask : Task.Run(async () =>
+                        Task server = scenario is "invalid arguments" or "utf8 error" ? Task.CompletedTask : Task.Run(async () =>
                         {
                             using var connection = await listener.AcceptTcpClientAsync(deadline.Token);
                             for (int q = 0; q < queries; q++)
@@ -272,7 +279,8 @@ static class Tests
                                 await connection.GetStream().WriteAsync(frame, deadline.Token);
                             }
                         });
-                        var start = new ProcessStartInfo(executable) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                        var start = new ProcessStartInfo(executable) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true,
+                            StandardOutputEncoding = new UTF8Encoding(false, true), StandardErrorEncoding = new UTF8Encoding(false, true) };
                         foreach (string arg in new[] { "--host", "127.0.0.1", "--port", port.ToString(), "--retries", "0" }.Concat(selection)) start.ArgumentList.Add(arg);
                         using var process = Process.Start(start)!;
                         Task<string> stdout = process.StandardOutput.ReadToEndAsync(deadline.Token);
@@ -280,11 +288,12 @@ static class Tests
                         try { await process.WaitForExitAsync(deadline.Token); await server; }
                         finally { if (!process.HasExited) process.Kill(true); }
                         string output = (await stdout).Trim(); string error = await stderr;
-                        if (scenario is "atomic failure" or "missing field" or "no fallback" or "invalid arguments")
+                        if (scenario is "atomic failure" or "missing field" or "no fallback" or "invalid arguments" or "utf8 error")
                         {
-                            Equal(process.ExitCode, scenario == "invalid arguments" ? 2 : 1);
+                            Equal(process.ExitCode, scenario is "invalid arguments" or "utf8 error" ? 2 : 1);
                             Equal(output, ""); Assert(error.Length > 0);
-                            if (scenario == "invalid arguments") Assert(!listener.Pending());
+                            if (scenario is "invalid arguments" or "utf8 error") Assert(!listener.Pending());
+                            if (scenario == "utf8 error") Equal(error.TrimEnd(), "Argument error: Unknown option: --неизвестная-опция");
                         }
                         else
                         {

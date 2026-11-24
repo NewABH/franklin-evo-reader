@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net.Sockets;
+using System.Text;
 
 namespace FranklinEvo;
 
@@ -117,6 +118,9 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        // Единая кодировка stdout/stderr для консоли и перенаправления в файл/канал.
+        // Задаём её до первого вывода, чтобы русские сообщения Windows не зависели от OEM-кодировки.
+        Console.OutputEncoding = new UTF8Encoding(false);
         // Коды выхода: 0 — успех, 1 — ошибка опроса/файлов, 2 — аргументы, 130 — Ctrl+C.
         Options options;
         try { options = Options.Parse(args); }
@@ -181,11 +185,16 @@ public static class Program
             {
                 failed = true;
                 // stderr отделяет диагностику от stdout, который может читать другая программа.
-                Console.Error.WriteLine($"{ex.GetType().Name}: {ex.Message}");
+                Console.Error.WriteLine(FormatError(ex));
             }
             if (options.Interval is null) break;
             await Task.Delay(TimeSpan.FromSeconds(options.Interval.Value), cancellation);
         }
         return failed ? 1 : 0;
     }
+
+    // Числовой код и имя SocketError позволяют диагностировать ошибку независимо от языка ОС.
+    public static string FormatError(Exception error) => error is SocketException socketError
+        ? $"SocketException [{socketError.NativeErrorCode}, {socketError.SocketErrorCode}]: {socketError.Message}"
+        : $"{error.GetType().Name}: {error.Message}";
 }

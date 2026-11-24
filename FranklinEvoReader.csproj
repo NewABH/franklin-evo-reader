@@ -8,7 +8,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <OptimizationPreference>Size</OptimizationPreference>
     <AssemblyName>FranklinEvoReader</AssemblyName>
-    <Version>2.3.1</Version>
+    <Version>2.3.2</Version>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <NativeDebugSymbols>false</NativeDebugSymbols>
